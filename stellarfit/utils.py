@@ -12,6 +12,7 @@ from datetime import datetime
 import h5py
 import numpy as np
 import os
+import requests
 from scipy.signal import butter, filtfilt
 
 
@@ -87,6 +88,91 @@ def download_stellar_spectra(st_teff, st_logg, st_met, outdir, silent=False):
                         fancyprint('File {} already downloaded.'.format(ffile))
 
     return wfile, ffiles
+
+
+def download_stellar_spectra_newera(st_teff, st_logg, st_met, outdir, silent=False):
+    """Download a grid of NewEra model stellar spectra.
+
+    Parameters
+    ----------
+    st_teff : float
+        Stellar effective temperature.
+    st_logg : float
+        Stellar log surface gravity.
+    st_met : float
+        Stellar metallicity as [Fe/H].
+    outdir : str
+        Output directory.
+    silent : bool
+        If True, do not show any prints.
+
+    Returns
+    -------
+    ffiles : list[str]
+        Path to model stellar spectrum files.
+    """
+
+    def do_download(url, save_path):
+        """Requests-based file download. Adapted from https://www.fdr.uni-hamburg.de/record/18108.
+        """
+        try:
+            # Send a GET request to the URL
+            response = requests.get(url, stream=True)
+            response.raise_for_status()  # Check for request errors
+
+            # Open a local file with write-binary mode
+            with open(save_path, 'wb') as file:
+                # Write the content to the file in chunks
+                for chunk in response.iter_content(chunk_size=8192):
+                    file.write(chunk)
+            return 0
+        except requests.exceptions.RequestException as e:
+            return -1
+
+    FDR = 'https://www.fdr.uni-hamburg.de/record/16738/files/'
+    FDRV3 = 'https://www.fdr.uni-hamburg.de/record/17670/files/'
+    FDRADD = 'https://www.fdr.uni-hamburg.de/record/17936/files/'
+
+    # Get stellar spectrum grid points.
+    teffs, loggs, mets = get_stellar_param_grid(st_teff, st_logg, st_met)
+
+    # Construct relevant file names to retrieve.
+    ffiles = []
+    for teff in teffs:
+        for logg in loggs:
+            for zscale in mets:
+                if zscale != 0.0:
+                    job_name = 'lte' + f'{teff:0=5.0f}' + f'{-logg:3.2f}' + f'{zscale:0=+4.1f}'
+                else:
+                    job_name = 'lte' + f'{teff:0=5.0f}' + f'{-logg:3.2f}' + '-' + f'{zscale:0=3.1f}'
+
+                file_name = job_name + '.PHOENIX-NewEra-ACES-COND-2023.HSR.h5'
+                ffile = outdir + file_name
+                ffiles.append(ffile)
+
+                # If the file is not already on disk, download it.
+                if not os.path.exists(ffile):
+                    if not silent:
+                        fancyprint('Downloading file {}.'.format(ffile))
+
+                    # Do the download
+                    url = FDR + file_name + '?download=1'
+                    if st_teff >= 5000.:
+                        url = FDRV3 + file_name + '?download=1'
+                    out = do_download(url, ffile)
+
+                    # If there is an error, try 'additional' model set.
+                    if out < 0:
+                        url = FDRADD + file_name + '?download=1'
+                        out = do_download(url, ffile)
+                    if out < 0:
+                        msg = 'Model {} does not exist in repository'.format(file_name)
+                        raise ValueError(msg)
+                else:
+                    if not silent:
+                        fancyprint('File {} already downloaded.'.format(ffile))
+
+    return ffiles
 
 
 def fancyprint(message, msg_type='INFO'):
