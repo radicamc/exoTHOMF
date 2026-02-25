@@ -63,7 +63,8 @@ class Dataset:
         self.nested_sampler = None
 
     def fit(self, output_file, sampler='MCMC', mcmc_start=None, mcmc_ncores=1, mcmc_steps=10000,
-            continue_mcmc=False, dynesty_args=None, highpass_filter=False, force_redo=False):
+            continue_mcmc=False, dynesty_args=None, highpass_filter=False, force_redo=False,
+            resume_dynesty=False, dynesty_resume_file=None):
         """Run a spectrum fit.
 
         Parameters
@@ -87,6 +88,10 @@ class Dataset:
             If True, highpass filter the model.
         force_redo : bool
             If True, will overwrite previous output files.
+        resume_dynesty : bool
+            If True, restart sampling from a previous fit.
+        dynesty_resume_file : str, None
+            Previous dynesty sampling save file from which to resume the fit.
         """
 
         # Set up and save output file name.
@@ -97,13 +102,14 @@ class Dataset:
         outdir = os.path.dirname(self.output_file)
         if not os.path.exists(outdir):
             Path(outdir).mkdir(parents=True, exist_ok=True)
-        else:
+        if os.path.exists(self.output_file):
             if force_redo is True:
                 fancyprint('force_redo=True, existing file {} will be overwritten.'
                            .format(output_file), msg_type='WARNING')
             else:
-                raise ValueError('Output file already {} exists and force_redo=False.'
-                                 .format(output_file))
+                fancyprint('Output file {} already exists and force_redo=False. Existing outputs '
+                           'will not be overwritten.'.format(output_file))
+                return
 
         # For MCMC sampling with emcee.
         if sampler == 'MCMC':
@@ -171,7 +177,8 @@ class Dataset:
             nested_sampler = fit_dynesty(set_prior_transform, log_likelihood, ndim,
                                          output_file=output_file, log_like_args=log_like_args,
                                          dynesty_args=dynesty_args, ptform_kwargs=ptform_kwargs,
-                                         silent=self.silent)
+                                         silent=self.silent, resume=resume_dynesty,
+                                         resume_file=dynesty_resume_file)
             self.nested_sampler = nested_sampler
 
         else:
@@ -274,7 +281,7 @@ class Dataset:
 
 
 def fit_dynesty(prior_transform, log_like, ndim, output_file, log_like_args, ptform_kwargs,
-                dynesty_args=None, silent=False):
+                dynesty_args=None, silent=False, resume=False, resume_file=None):
     """Run a light curve fit via nested sampling using the dynesty.
 
     Parameters
@@ -295,6 +302,10 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file, log_like_args, ptf
         Arguments for dynesty NestedSampler instance.
     silent : bool
         If True, do not show progress updates.
+    resume : bool
+        If True, restart sampling from a previous fit.
+    resume_file : str, None
+        Previous dynesty sampling save file from which to resume the fit.
 
     Returns
     -------
@@ -323,9 +334,13 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file, log_like_args, ptf
     hf.close()
 
     # Initialize and run nested sampler.
-    sampler = NestedSampler(log_like, prior_transform, ndim, logl_args=log_like_args,
-                            sample='rwalk', ptform_kwargs=ptform_kwargs, **dynesty_args)
-    sampler.run_nested(print_progress=not silent)
+    if resume is True:
+        sampler = NestedSampler.restore(resume_file)
+    else:
+        sampler = NestedSampler(log_like, prior_transform, ndim, logl_args=log_like_args,
+                                sample='rwalk', ptform_kwargs=ptform_kwargs, **dynesty_args)
+    sampler.run_nested(print_progress=not silent, resume=resume,
+                       checkpoint_file=output_file[:-3]+'_dynesty.save')
 
     # Get dynesty results dictionary.
     results = sampler.results

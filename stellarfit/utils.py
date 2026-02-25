@@ -480,3 +480,19 @@ def verify_inputs(input_params):
             raise ValueError('Unknown parameter: {}'.format(param))
 
     return input_params
+
+
+def verify_path(path):
+    """Verify that a given directory exists. If not, create it.
+
+    Parameters
+    ----------
+    path : str
+        Path to directory.
+    """
+
+    if os.path.exists(path):
+        pass
+    else:
+        # If directory doesn't exist, create it.
+        os.mkdir(path)
