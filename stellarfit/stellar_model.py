@@ -92,7 +92,7 @@ class StellarModel:
         self.input_parameters = input_parameters
 
     def compute_model(self, data_wave_low=None, data_wave_high=None, highpass_filter=False,
-                      mean=False):
+                      mean=True):
         """Compute a stellar spectrum model with the given set of input parameters and bin
         (if desired).
 
@@ -177,7 +177,7 @@ class StellarModel:
 
         self.model = star
         self.wavelengths = waves
-        
+
 
 class ContrastModel:
     """Secondary StellarFit class. Interpolates a model of a spot contrast spectrum given
