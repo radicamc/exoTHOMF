@@ -134,20 +134,50 @@ def load_newera_grid(temperatures, log_gs, input_dir, flux_conv_factor, wave_low
 
     # New Era Grid
     temperatures, log_gs = np.array(temperatures), np.array(log_gs)
+
+    # Make sure that gravity end points are multiples of 0.5. If not round.
+    words = ['Lower', 'Upper']
+    for i, g in enumerate(log_gs):
+        if g % 0.5 != 0:
+            gs_round = round(g / 0.5) * 0.5
+            fancyprint('{0} grid bound for gravity changed from {1} to {2}.'.
+                       format(words[i], g, gs_round), msg_type='WARNING')
+            log_gs[i] = gs_round
+
+    # Make sure that temperature end points are multiples of 100 (or 200 if >7000K). If not round.
+    for i, t in enumerate(temperatures):
+        if t <= 7000:
+            step = 100
+        else:
+            step = 200
+        if t % step != 0:
+            ts_round = round(t / step) * step
+            fancyprint('{0} grid bound for temperature changed from {1} to {2}.'.
+                       format(words[i], t, ts_round), msg_type='WARNING')
+            temperatures[i] = ts_round
+
     # Ensure that temperatures and gravities are within the allowed range for the grid.
     if np.max(temperatures) > 8000 or np.min(temperatures) < 2300:
-        raise ValueError('Temperatures for the New Era grid must be between 2300K and 8000K.')
+        raise ValueError('Temperatures for the New Era grid must be between 2300K and 10000K.')
     if np.max(log_gs) > 6.0 or np.min(log_gs) < 0.0:
         raise ValueError('log g values for the New Era grid must be between 0.0 and 6.0.')
 
     fancyprint('Loading New Era model grid for temperatures in range {0}--{1}K and log gravity '
                'in range {2}--{3}.'.format(temperatures[0], temperatures[1], log_gs[0], log_gs[1]))
 
-    # Define the steps in tempreature and gravity (100K for T and 0.5 for g).
-    t_steps = int((temperatures[1] - temperatures[0]) / 100 + 1)
+    # Define the steps in gravity (0.5).
     g_steps = int((log_gs[1] - log_gs[0]) / 0.5 + 1)
-    temperatures = np.linspace(temperatures[0], temperatures[1], t_steps).astype(int)
     log_gs = np.linspace(log_gs[0], log_gs[1], g_steps)
+    # Define the steps in temperature (100K if <=7000K and 200K if >7000K).
+    if temperatures[1] > 7000:
+        t_steps = int((7000 - temperatures[0]) / 100 + 1)
+        tt = np.linspace(temperatures[0], 7000, t_steps).astype(int)
+
+        t_steps = int((temperatures[1] - 7000) / 200 + 1)
+        temperatures = np.concatenate([tt, np.linspace(7000, temperatures[1], t_steps).astype(int)[1:]])
+    else:
+        t_steps = int((temperatures[1] - temperatures[0]) / 100 + 1)
+        temperatures = np.linspace(temperatures[0], temperatures[1], t_steps).astype(int)
 
     # Create some storage arrays.
     spectra = []
