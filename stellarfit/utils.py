@@ -556,7 +556,7 @@ def verify_inputs_contrast(input_params):
     """
 
     param_names = ['teff', 'dt_umbra', 'f_umbra', 'dt_penumbra', 'logg_phot', 'dg_umbra',
-                   'dg_penumbra', 'sigma']
+                   'dg_penumbra', 'sigma', 'cov_frac', 'chord_frac']
     for param in input_params.keys():
         if param not in param_names:
             raise ValueError('Unknown parameter: {}'.format(param))

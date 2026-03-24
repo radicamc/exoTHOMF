@@ -346,9 +346,9 @@ def load_sphinx_grid(temperatures, log_gs, input_dir, flux_conv_factor, wave_low
         Factor converting from flux at the stellar surface to flux received at Earth,
         i.e., (radius_star / distance_from_Earth)^2.
     wave_low : float
-        Low wavelength cut off for stellar mdoels (in µm).
+        Low wavelength cut off for stellar models (in µm).
     wave_high : float
-        High wavelength cut off for stellar mdoels (in µm).
+        High wavelength cut off for stellar models (in µm).
 
     Returns
     -------

@@ -80,7 +80,8 @@ def make_corner_plot(filename, mcmc_burnin=None, mcmc_thin=15, labels=None,
         plt.show()
 
 
-def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_filter=False):
+def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_filter=False,
+                       contrast=False):
     """Make a plot of the stellar spectrum fit and residuals.
 
     Parameters
@@ -92,6 +93,8 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_f
     outpdf
     highpass_filter : bool
         If True, pass the data through a highpass filter.
+    contrast : bool
+        If True, plotting a spot constrast and not a stellar spectrum fit.
     """
 
     def chi2(o, m, e):
@@ -119,7 +122,10 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_f
     ax2.tick_params(direction='in')
     ax1.xaxis.set_major_formatter(plt.NullFormatter())
     ax2.set_xlabel('Wavelength [µm]', fontsize=12)
-    ax1.set_ylabel('Flux at Earth [erg/s/cm2/µm]', fontsize=12)
+    if contrast is True:
+        ax1.set_ylabel('Spot Contrast', fontsize=12)
+    else:
+        ax1.set_ylabel('Flux at Earth [erg/s/cm2/µm]', fontsize=12)
     ax2.set_ylabel('Residuals', fontsize=12)
 
     xpos = np.percentile(wavelengths, 1)

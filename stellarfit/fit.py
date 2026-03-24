@@ -21,17 +21,17 @@ import os
 from pathlib import Path
 
 from stellarfit import priors, utils, plotting
-from stellarfit.stellar_model import StellarModel
+from stellarfit.stellar_model import StellarModel, ContrastModel
 from stellarfit.utils import fancyprint
 
 
 class Dataset:
-    """A wrapper class around StellarModel which stores a set of stellar spectrum observations
-    and performs light curve fits.
+    """A general purpose class for fitting a variety of models (StellarModel, ConstrastModel, etc.)
+    to observations.
     """
 
     def __init__(self, input_parameters, wavebins_low, wavebins_high, observations, errors,
-                 stellar_grid, silent=False):
+                 stellar_grid, fit_type='abs-flux', silent=False):
         """Initialize the Dataset class.
 
         Parameters
@@ -48,6 +48,10 @@ class Dataset:
             Errors on the observed stellar spectrum.
         stellar_grid : scipy RegularGridInterpolator object
             Stellar model grid.
+        fit_type : str
+            Type of model to fit. Currently supported are "abs-flux" for absolute flux fits,
+             "spot-cont" for star spot contrast fits, "spot-amp" for star spot amplitude fits, and
+             "tls" for stellar contamination fits.
         silent : bool
             If False, don't show any progress bars or prints.
         """
@@ -58,11 +62,16 @@ class Dataset:
         self.obs = observations
         self.errors = errors
         self.stellar_grid = stellar_grid
-        self.stellar_model = None
+        self.model = None
         self.silent = silent
         self.output_file = None
         self.mcmc_sampler = None
         self.nested_sampler = None
+        fit_types = ['abs-flux', 'spot-cont', 'spot-amp', 'tls']
+        if fit_type not in fit_types:
+            raise ValueError('Unknown fit type: {0}. \nAcceptable values are {1}.'
+                             .format(fit_type, fit_types))
+        self.fit_type = fit_type
 
     def fit(self, output_file, sampler='MCMC', mcmc_start=None, mcmc_ncores=1, mcmc_steps=10000,
             continue_mcmc=False, dynesty_args=None, highpass_filter=False, force_redo=False,
@@ -150,8 +159,15 @@ class Dataset:
                 raise ValueError('Unknown distribution {0} for parameter {1}'.format(dist, param))
             ndim += 1
 
-        # Initialize the stellar model with dummy parameters and the passed stellar grid.
-        self.stellar_model = StellarModel(this_param, self.stellar_grid)
+        # Initialize the relevant model with dummy parameters and the passed stellar grid.
+        if self.fit_type == 'abs-flux':
+            self.model = StellarModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-cont':
+            self.model = ContrastModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-amp':
+            self.model = ContrastModel(this_param, self.stellar_grid, amplitude_spectrum=True)
+        else:
+            raise NotImplementedError('TLS fits not currently implemented.')
 
         # For MCMC sampling with emcee.
         if sampler == 'MCMC':
@@ -161,7 +177,7 @@ class Dataset:
 
             # Arguments for the log probability function call.
             log_prob_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
-                             self.errors, self.stellar_model, highpass_filter)
+                             self.errors, self.model, highpass_filter)
 
             # Initialize and run the emcee sampler.
             mcmc_sampler = fit_emcee(log_probability, initial_pos=mcmc_start, silent=self.silent,
@@ -174,7 +190,7 @@ class Dataset:
         elif sampler == 'NestedSampling':
             # Arguments for the log likelihood function call.
             log_like_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
-                             self.errors, self.stellar_model, highpass_filter)
+                             self.errors, self.model, highpass_filter)
             ptform_kwargs = {'param_dict': self.input_parameters}
 
             nested_sampler = fit_dynesty(set_prior_transform, log_likelihood, ndim,
@@ -505,8 +521,8 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, s
     return log_like
 
 
-def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, model_grid,
-                    stellar_model, highpass_filter=False):
+def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
+                    highpass_filter=False):
     """Evaluate the log probability for a dataset and a given set of model parameters.
 
     Parameters
@@ -523,7 +539,7 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, 
         Spectrum to fit.
     errors: array-like(float)
         Errors on the stellar spectrum
-    stellar_model : StellarModel instance
+    stellar_model : StellarModel/ContrastModel instance
         Initialized stellar model.
     highpass_filter : bool
         If True, highpass filter the model.

@@ -132,7 +132,7 @@ class StellarModel:
             t_fac = t + self.input_parameters['dt_fac']['value']
             f_fac = self.input_parameters['f_fac']['value']
             if 'dg_fac' in self.input_parameters.keys():
-                g_fac = g - self.input_parameters['dg_fac']['value']
+                g_fac = g + self.input_parameters['dg_fac']['value']
             else:
                 g_fac = g
             fac_mod = f_fac * self.stellar_grid.stellar_grid((t_fac, g_fac))
@@ -184,7 +184,7 @@ class ContrastModel:
     a set of input parameters and a stellar model grid.
     """
 
-    def __init__(self, input_parameters, stellar_grid, dt_min=100):
+    def __init__(self, input_parameters, stellar_grid, dt_min=100, amplitude_spectrum=False):
         """Initialize the ContrastModel class.
 
         Parameters
@@ -195,16 +195,38 @@ class ContrastModel:
             Grid of stellar models.
         dt_min : float
             Minimum allowed temperature difference between the photosphere and heterogeneities.
+        amplitude_spectrum : bool
+            If True, produce a spectrum of spot amplitudes reltive to the transit depth instead of
+            calculating the True spot contrast.
         """
 
         self.stellar_grid = stellar_grid
-        self.input_parameters = utils.verify_inputs_contrast(input_parameters)
+        self.input_parameters = None
         self.two_component = False
         self.model = None
         self.wavelengths = None
+        self.resample_inds = None
+        self.resample_max_dim = None
+        self.amplitude_spectrum = amplitude_spectrum
+
+        # Set input parameters.
+        self.update_parameters(input_parameters, dt_min)
+
+    def update_parameters(self, input_parameters, dt_min=100):
+        """Update or set the parameter dictionary.
+
+        Parameters
+        ----------
+        input_parameters : dict
+            Dictionary of input parameters.
+        dt_min : float
+            Minimum allowed temperature difference between the photosphere and heterogeneities.
+        """
+
+        input_parameters = utils.verify_inputs_contrast(input_parameters)
 
         # Determine whether the spot model will be one- or two-component.
-        for key in self.input_parameters.keys():
+        for key in input_parameters.keys():
             key_split = key.split('_')
             if len(key_split) > 1:
                 if key_split[1] == 'penumbra':
@@ -212,24 +234,31 @@ class ContrastModel:
 
         # Make sure a photosphere temperature and gravity are included.
         for param in ['teff', 'logg_phot']:
-            assert param in self.input_parameters.keys()
+            assert param in input_parameters.keys()
         # Make sure a reasonable spot temperature is passed.
-        assert 'dt_umbra' in self.input_parameters.keys()
-        if self.input_parameters['dt_umbra']['value'] < dt_min:
+        assert 'dt_umbra' in input_parameters.keys()
+        if input_parameters['dt_umbra']['value'] < dt_min:
             msg = 'dt_umbra less than minimum temperature contrast of {}K.'.format(dt_min)
             raise ValueError(msg)
         # Do same for penumbra.
         if self.two_component is True:
-            assert 'dt_penumbra' in self.input_parameters.keys()
-            assert 'f_umbra' in self.input_parameters.keys()
-            if self.input_parameters['dt_penumbra']['value'] < dt_min:
+            assert 'dt_penumbra' in input_parameters.keys()
+            assert 'f_umbra' in input_parameters.keys()
+            if input_parameters['dt_penumbra']['value'] < dt_min:
                 msg = 'dt_penumbra less than minimum temperature contrast of {}K.'.format(dt_min)
                 raise ValueError(msg)
-            # Penumbra shouldn't be colder than the umbra.
-            if self.input_parameters['dt_penumbra']['value'] <= self.input_parameters['dt_umbra']['value']:
-                raise ValueError('Penumbra colder than umbra.')
 
-    def compute_model(self, data_wave_low=None, data_wave_high=None, highpass_filter=False):
+        # If a true contrast model is not being calculated, make sure the total spot covering
+        # fraction and chord covering fraction are passed.
+        if self.amplitude_spectrum is True:
+            assert 'cov_frac' in input_parameters.keys()
+            assert 'chord_frac' in input_parameters.keys()
+
+        # Set input parameters.
+        self.input_parameters = input_parameters
+
+    def compute_model(self, data_wave_low=None, data_wave_high=None, highpass_filter=False,
+                      mean=True):
         """Compute a spot contrast model with the given set of input parameters and bin
         (if desired).
 
@@ -241,6 +270,9 @@ class ContrastModel:
             Upper edges of data wavelength bins (in µm).
         highpass_filter : bool
             If True, highpass filter the model.
+        mean : bool
+            Spectral reampling method. If True use the average (faster). If False, use
+            trapezoidal integration (slower).
         """
 
         # Get the appropriate stellar model from the model grid.
@@ -258,6 +290,10 @@ class ContrastModel:
 
         # For a two-component model.
         if self.two_component is True:
+            # Penumbra shouldn't be colder than the umbra.
+            if self.input_parameters['dt_penumbra']['value'] >= self.input_parameters['dt_umbra']['value']:
+                raise ValueError('Penumbra colder than umbra.')
+
             t_penumbra = t - self.input_parameters['dt_penumbra']['value']
             if 'dg_penumbra' in self.input_parameters.keys():
                 g_penumbra = g + self.input_parameters['dg_penumbra']['value']
@@ -277,13 +313,29 @@ class ContrastModel:
         # Calculate contrast from photosphere and spot.
         contrast_mod = 1 - spot_mod / phot_mod
 
+        # If a spot amplitude spectrum is being calculated, scale the contrast by the covering
+        # fraction and chord covering fraction following Murray & Berta-Thompson (2025) equ 8.
+        # Note that 'cov_frac' and 'chord_frac' are the f and g values in this equation,
+        # respectively.
+        if self.amplitude_spectrum is True:
+            gg = self.input_parameters['chord_frac']['value']
+            f = self.input_parameters['cov_frac']['value']
+            contrast_mod = gg / (1/contrast_mod - f)
+
         if data_wave_low is not None:
             assert len(data_wave_low) == len(data_wave_high)
             data_wave = np.mean([data_wave_low, data_wave_high], axis=0)
             # For PHOENIX, New Era models, bin down to resolution of the data.
             if self.stellar_grid.model_type != 'SPHINX':
-                contrast_mod = utils.resample_model(data_wave_low, data_wave_high,
-                                                    self.stellar_grid.wavelengths, contrast_mod)
+                if mean is True:
+                    out = utils.resample_model_mean(data_wave_low, data_wave_high,
+                                                    self.stellar_grid.wavelengths, contrast_mod,
+                                                    inds=self.resample_inds,
+                                                    max_dim=self.resample_max_dim)
+                    contrast_mod, self.resample_inds, self.resample_max_dim = out
+                else:
+                    contrast_mod = utils.resample_model(data_wave_low, data_wave_high,
+                                                        self.stellar_grid.wavelengths, contrast_mod)
             # For SPHINX models, bin data down to model resolution.
             else:
                 contrast_mod = np.interp(data_wave, self.stellar_grid.wavelengths, contrast_mod)
