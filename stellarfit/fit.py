@@ -12,6 +12,7 @@ import copy
 from datetime import datetime
 from dynesty import NestedSampler
 from dynesty.utils import resample_equal
+from dynesty.pool import Pool
 import emcee
 import h5py
 from multiprocessing import Pool
@@ -20,17 +21,17 @@ import os
 from pathlib import Path
 
 from stellarfit import priors, utils, plotting
-from stellarfit.stellar_model import StellarModel
+from stellarfit.stellar_model import StellarModel, ContrastModel
 from stellarfit.utils import fancyprint
 
 
 class Dataset:
-    """A wrapper class around StellarModel which stores a set of stellar spectrum observations
-    and performs light curve fits.
+    """A general purpose class for fitting a variety of models (StellarModel, ConstrastModel, etc.)
+    to observations.
     """
 
     def __init__(self, input_parameters, wavebins_low, wavebins_high, observations, errors,
-                 stellar_grid, silent=False):
+                 stellar_grid, fit_type='abs-flux', silent=False):
         """Initialize the Dataset class.
 
         Parameters
@@ -47,6 +48,10 @@ class Dataset:
             Errors on the observed stellar spectrum.
         stellar_grid : scipy RegularGridInterpolator object
             Stellar model grid.
+        fit_type : str
+            Type of model to fit. Currently supported are "abs-flux" for absolute flux fits,
+             "spot-cont" for star spot contrast fits, "spot-amp" for star spot amplitude fits, and
+             "tls" for stellar contamination fits.
         silent : bool
             If False, don't show any progress bars or prints.
         """
@@ -57,10 +62,16 @@ class Dataset:
         self.obs = observations
         self.errors = errors
         self.stellar_grid = stellar_grid
+        self.model = None
         self.silent = silent
         self.output_file = None
         self.mcmc_sampler = None
         self.nested_sampler = None
+        fit_types = ['abs-flux', 'spot-cont', 'spot-amp', 'tls']
+        if fit_type not in fit_types:
+            raise ValueError('Unknown fit type: {0}. \nAcceptable values are {1}.'
+                             .format(fit_type, fit_types))
+        self.fit_type = fit_type
 
     def fit(self, output_file, sampler='MCMC', mcmc_start=None, mcmc_ncores=1, mcmc_steps=10000,
             continue_mcmc=False, dynesty_args=None, highpass_filter=False, force_redo=False,
@@ -111,33 +122,62 @@ class Dataset:
                            'will not be overwritten.'.format(output_file))
                 return
 
-        # For MCMC sampling with emcee.
-        if sampler == 'MCMC':
-            # For each parameter, get the prior function to be used based on
-            # the indicated prior distribution.
-            for param in self.input_parameters:
-                dist = self.input_parameters[param]['distribution']
-                if dist == 'fixed':
-                    self.input_parameters[param]['function'] = None
-                elif dist == 'uniform':
+        # For each parameter, get the prior transform/function to be used based on
+        # the indicated prior distribution.
+        this_param = copy.deepcopy(self.input_parameters)
+        ndim = 0
+        for param in self.input_parameters:
+            dist = self.input_parameters[param]['distribution']
+            if dist == 'fixed':
+                self.input_parameters[param]['function'] = None
+                ndim -= 1
+            elif dist == 'uniform':
+                if sampler == 'MCMC':
                     self.input_parameters[param]['function'] = priors.logprior_uniform
-                elif dist == 'loguniform':
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_uniform
+                this_param[param]['value'] = np.mean(self.input_parameters[param]['value'])
+            elif dist == 'loguniform':
+                if sampler == 'MCMC':
                     self.input_parameters[param]['function'] = priors.logprior_loguniform
-                elif dist == 'normal':
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_loguniform
+                this_param[param]['value'] = np.mean(self.input_parameters[param]['value'])
+            elif dist == 'normal':
+                if sampler == 'MCMC':
                     self.input_parameters[param]['function'] = priors.logprior_normal
-                elif dist == 'truncated_normal':
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_normal
+                this_param[param]['value'] = self.input_parameters[param]['value'][0]
+            elif dist == 'truncated_normal':
+                if sampler == 'MCMC':
                     self.input_parameters[param]['function'] = priors.logprior_truncatednormal
                 else:
-                    raise ValueError('Unknown distribution {0} for parameter {1}'
-                                     .format(dist, param))
+                    self.input_parameters[param]['function'] = priors.transform_truncatednormal
+                this_param[param]['value'] = self.input_parameters[param]['value'][0]
+            else:
+                raise ValueError('Unknown distribution {0} for parameter {1}'.format(dist, param))
+            ndim += 1
 
+        # Initialize the relevant model with dummy parameters and the passed stellar grid.
+        if self.fit_type == 'abs-flux':
+            self.model = StellarModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-cont':
+            self.model = ContrastModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-amp':
+            self.model = ContrastModel(this_param, self.stellar_grid, amplitude_spectrum=True)
+        else:
+            raise NotImplementedError('TLS fits not currently implemented.')
+
+        # For MCMC sampling with emcee.
+        if sampler == 'MCMC':
             if continue_mcmc is False:
                 msg = 'Starting positions must be provided for MCMC sampling.'
                 assert mcmc_start is not None, msg
 
             # Arguments for the log probability function call.
             log_prob_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
-                             self.errors, self.stellar_grid, highpass_filter)
+                             self.errors, self.model, highpass_filter)
 
             # Initialize and run the emcee sampler.
             mcmc_sampler = fit_emcee(log_probability, initial_pos=mcmc_start, silent=self.silent,
@@ -148,30 +188,9 @@ class Dataset:
 
         # For Nested Sampling with dynesty.
         elif sampler == 'NestedSampling':
-            # For each parameter, get the prior transform function to be used based on the
-            # indicated prior distribution.
-            ndim = 0
-            for param in self.input_parameters:
-                dist = self.input_parameters[param]['distribution']
-                if dist == 'fixed':
-                    self.input_parameters[param]['function'] = None
-                    ndim -= 1
-                elif dist == 'uniform':
-                    self.input_parameters[param]['function'] = priors.transform_uniform
-                elif dist == 'loguniform':
-                    self.input_parameters[param]['function'] = priors.transform_loguniform
-                elif dist == 'normal':
-                    self.input_parameters[param]['function'] = priors.transform_normal
-                elif dist == 'truncated_normal':
-                    self.input_parameters[param]['function'] = priors.transform_truncatednormal
-                else:
-                    raise ValueError('Unknown distribution {0} for parameter {1}'
-                                     .format(dist, param))
-                ndim += 1
-
             # Arguments for the log likelihood function call.
             log_like_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
-                             self.errors, self.stellar_grid, highpass_filter)
+                             self.errors, self.model, highpass_filter)
             ptform_kwargs = {'param_dict': self.input_parameters}
 
             nested_sampler = fit_dynesty(set_prior_transform, log_likelihood, ndim,
@@ -337,8 +356,9 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file, log_like_args, ptf
     if resume is True:
         sampler = NestedSampler.restore(resume_file)
     else:
-        sampler = NestedSampler(log_like, prior_transform, ndim, logl_args=log_like_args,
-                                sample='rwalk', ptform_kwargs=ptform_kwargs, **dynesty_args)
+        sampler = NestedSampler(log_like, prior_transform, ndim, sample='rwalk',
+                                logl_args=log_like_args, ptform_kwargs=ptform_kwargs,
+                                **dynesty_args)
     sampler.run_nested(print_progress=not silent, resume=resume,
                        checkpoint_file=output_file[:-3]+'_dynesty.save')
 
@@ -439,7 +459,7 @@ def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False, silen
     return sampler
 
 
-def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, model_grid,
+def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
                    highpass_filter=False):
     """Evaluate the log likelihood for a dataset and a given set of model parameters.
 
@@ -457,8 +477,8 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, m
         Spectrum to fit.
     errors: array-like(float)
         Errors on the stellar spectrum
-    model_grid :
-        Stellar model grid.
+    stellar_model : StellarModel instance
+        Initialized stellar model.
     highpass_filter : bool
         If True, highpass filter the model.
 
@@ -478,9 +498,9 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, m
         pcounter += 1
 
     try:
-        thismodel = StellarModel(this_param, model_grid)
-        thismodel.compute_model(data_wave_low=wavebins_low, data_wave_high=wavebins_up,
-                                highpass_filter=highpass_filter)
+        stellar_model.update_parameters(this_param)
+        stellar_model.compute_model(data_wave_low=wavebins_low, data_wave_high=wavebins_up,
+                                    highpass_filter=highpass_filter)
     except ValueError:
         return -np.inf
 
@@ -496,12 +516,12 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, m
     else:
         thisdata = data
 
-    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - thismodel.model)/thiserr)**2)
+    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - stellar_model.model)/thiserr)**2)
 
     return log_like
 
 
-def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, model_grid,
+def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
                     highpass_filter=False):
     """Evaluate the log probability for a dataset and a given set of model parameters.
 
@@ -519,8 +539,8 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, 
         Spectrum to fit.
     errors: array-like(float)
         Errors on the stellar spectrum
-    model_grid :
-        Stellar model grid.
+    stellar_model : StellarModel/ContrastModel instance
+        Initialized stellar model.
     highpass_filter : bool
         If True, highpass filter the model.
 
@@ -533,7 +553,7 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, 
     lp = set_logprior(theta, param_dict)
     if not np.isfinite(lp):
         return -np.inf
-    ll = log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, model_grid,
+    ll = log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
                         highpass_filter=highpass_filter)
     if not np.isfinite(ll):
         return -np.inf

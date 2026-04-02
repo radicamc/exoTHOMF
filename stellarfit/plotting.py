@@ -15,6 +15,8 @@ from matplotlib.gridspec import GridSpec
 import matplotlib.pyplot as plt
 import numpy as np
 
+from stellarfit import utils
+
 
 def make_corner_plot(filename, mcmc_burnin=None, mcmc_thin=15, labels=None,
                      outpdf=None, log_params=None, drop_chains=None):
@@ -78,7 +80,8 @@ def make_corner_plot(filename, mcmc_burnin=None, mcmc_thin=15, labels=None,
         plt.show()
 
 
-def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None):
+def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_filter=False,
+                       contrast=False):
     """Make a plot of the stellar spectrum fit and residuals.
 
     Parameters
@@ -88,6 +91,10 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None):
     model
     errors
     outpdf
+    highpass_filter : bool
+        If True, pass the data through a highpass filter.
+    contrast : bool
+        If True, plotting a spot constrast and not a stellar spectrum fit.
     """
 
     def chi2(o, m, e):
@@ -99,23 +106,31 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None):
     ax1 = plt.subplot(gs[0])
     ax2 = plt.subplot(gs[1])
 
-    ax1.errorbar(wavelengths, data, yerr=errors, fmt='o', mfc='white', c='royalblue', ms=1,
+    if highpass_filter is True:
+        thisdata = utils.highpass_filter(data)
+    else:
+        thisdata = data
+
+    ax1.errorbar(wavelengths, thisdata, yerr=errors, fmt='o', mfc='white', c='royalblue', ms=1,
                  zorder=-1)
     ax1.plot(wavelengths, model, c='black', lw=0.5)
 
-    ax2.errorbar(wavelengths, data - model, mfc='white', c='royalblue', fmt='o', ms=1)
+    ax2.errorbar(wavelengths, thisdata - model, mfc='white', c='royalblue', fmt='o', ms=1)
     ax2.axhline(0, ls='--', c='black')
 
     ax1.tick_params(direction='in')
     ax2.tick_params(direction='in')
     ax1.xaxis.set_major_formatter(plt.NullFormatter())
     ax2.set_xlabel('Wavelength [µm]', fontsize=12)
-    ax1.set_ylabel('Flux at Earth [erg/s/cm2/µm]', fontsize=12)
+    if contrast is True:
+        ax1.set_ylabel('Spot Contrast', fontsize=12)
+    else:
+        ax1.set_ylabel('Flux at Earth [erg/s/cm2/µm]', fontsize=12)
     ax2.set_ylabel('Residuals', fontsize=12)
 
     xpos = np.percentile(wavelengths, 1)
-    ax2.text(xpos, np.max(data - model),
-             r'$\rm \chi^2_d$={:.2f}'.format(chi2(data, model, errors) / len(data)))
+    ax2.text(xpos, np.max(thisdata - model),
+             r'$\rm \chi^2_d$={:.2f}'.format(chi2(thisdata, model, errors) / len(thisdata)))
 
     if outpdf is not None:
         if isinstance(outpdf, matplotlib.backends.backend_pdf.PdfPages):

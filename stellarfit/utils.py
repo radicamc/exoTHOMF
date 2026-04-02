@@ -190,10 +190,9 @@ def fancyprint(message, msg_type='INFO'):
     print('{} - StellarFit - {} - {}'.format(time, msg_type, message))
 
 
-def get_param_dict_from_fit(filename, method='median', mcmc_burnin=None,
-                            mcmc_thin=15, silent=False, drop_chains=None):
-    """Reformat fit outputs from MCMC or NS into the parameter dictionary
-    format expected by Model.
+def get_param_dict_from_fit(filename, method='median', mcmc_burnin=None, mcmc_thin=15,
+                            silent=False, drop_chains=None):
+    """Reformat fit outputs from MCMC or NS into the parameter dictionary format expected by Model.
     Borrowed from exoUPRF.
 
     Parameters
@@ -244,8 +243,7 @@ def get_param_dict_from_fit(filename, method='median', mcmc_burnin=None,
             chain = f['ns']['chain'][()]
             sampler = 'ns'
         else:
-            msg = 'No MCMC or Nested Sampling results in file ' \
-                  '{}.'.format(filename)
+            msg = 'No MCMC or Nested Sampling results in file {}.'.format(filename)
             raise KeyError(msg)
         # Either get maximum likelihood solution...
         if method == 'maxlike':
@@ -259,8 +257,7 @@ def get_param_dict_from_fit(filename, method='median', mcmc_burnin=None,
         elif method == 'median':
             bestfit = np.nanmedian(chain, axis=0)
 
-        # HDF5 groups are in alphabetical order. Reorder to match original
-        # inputs.
+        # HDF5 groups are in alphabetical order. Reorder to match original inputs.
         params, order = [], []
         for param in f['inputs'].keys():
             params.append(param)
@@ -286,10 +283,8 @@ def get_param_dict_from_fit(filename, method='median', mcmc_burnin=None,
     return param_dict
 
 
-def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
-                         silent=False, drop_chains=None):
-    """Extract posterior sample statistics (median and 1 sigma bounds) for
-    each fitted parameter.
+def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15, silent=False, drop_chains=None):
+    """Extract posterior sample statistics (median and 1 sigma bounds) for each fitted parameter.
     Borrowed from exoUPRF.
 
     Parameters
@@ -297,8 +292,7 @@ def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
     filename : str
         Path to file with MCMC fit outputs.
     mcmc_burnin : int
-        Number of steps to discard as burn in. Defaults to 75% of chain
-        length. Only for MCMC.
+        Number of steps to discard as burn in. Defaults to 75% of chain length. Only for MCMC.
     mcmc_thin : int
         Increment by which to thin chains. Only for MCMC.
     silent : bool
@@ -309,8 +303,7 @@ def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
     Returns
     -------
     results_dict : dict
-        Dictionary of posterior medians and 1 sigma bounds for each fitted
-        parameter.
+        Dictionary of posterior medians and 1 sigma bounds for each fitted parameter.
     """
 
     if not silent:
@@ -335,12 +328,10 @@ def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
         elif 'ns' in list(f.keys()):
             chain = f['ns']['chain'][()]
         else:
-            msg = 'No MCMC or Nested Sampling results in file ' \
-                  '{}.'.format(filename)
+            msg = 'No MCMC or Nested Sampling results in file {}.'.format(filename)
             raise KeyError(msg)
 
-        # HDF5 groups are in alphabetical order. Reorder to match original
-        # inputs.
+        # HDF5 groups are in alphabetical order. Reorder to match original inputs.
         params, order = [], []
         for param in f['inputs'].keys():
             params.append(param)
@@ -348,8 +339,8 @@ def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
         ii = np.argsort(order)
         params = np.array(params)[ii]
 
-        # Create the parameter dictionary expected for Model using the fixed
-        # parameters from the original inputs and the MCMC results.
+        # Create the parameter dictionary expected for Model using the fixed parameters from
+        # the original inputs and the MCMC results.
         results_dict = {}
         pcounter = 0
         for param in params:
@@ -371,8 +362,8 @@ def get_results_from_fit(filename, mcmc_burnin=None, mcmc_thin=15,
 
 
 def get_stellar_param_grid(st_teff, st_logg, st_met):
-    """Given a set of stellar parameters, determine the neighbouring grid
-    points based on the PHOENIX grid steps.
+    """Given a set of stellar parameters, determine the neighbouring grid points based on the
+    PHOENIX grid steps.
     Borrowed from exoTEDRF.
 
     Parameters
@@ -430,9 +421,9 @@ def highpass_filter(signal, order=3, freq=0.01):
     return signal_filt
 
 
-def resample_model(data_wave_min, data_wave_max, mod_wave, mod_flux):
-    """Resample a high-resolution model to the wavelength sampling of the data
-    using trapezoidal integration.
+def resample_model(data_wave_min, data_wave_max, mod_wave, mod_flux, inds=None):
+    """Resample a high-resolution model to the wavelength sampling of the data using trapezoidal
+     integration.
 
     Parameters
     ----------
@@ -444,22 +435,37 @@ def resample_model(data_wave_min, data_wave_max, mod_wave, mod_flux):
         Model wavelengths.
     mod_flux : array-like(float)
         Model spectrum flux values.
+    inds : dict, None
+        Dictionary of model indicies corrsponding to different bins.
 
     Returns
     -------
     flux_resamp : ndarray(float)
         Model flux resampled to match the data bins.
+    inds : dict
+        Dictionary of model indicies corrsponding to different bins.
     """
 
     flux_resamp = []
     assert len(data_wave_min) == len(data_wave_max)
+
+    # Get indices of model points to be put into each bin. When sampling, this can be calculated
+    # once, returned, and then passed for each subsequent evaluation since the wavelength grids
+    # do not change.
+    if inds is None:
+        inds = {}
+        for i in range(len(data_wave_min)):
+            # All model wavelengths within this bin.
+            ii = np.where((mod_wave >= data_wave_min[i]) & (mod_wave < data_wave_max[i]))
+            inds['{}'.format(i)] = ii
+
     # Get model wavelength spacing.
     dwave = mod_wave[1:] - mod_wave[:-1]
 
     # Loop over all data wavelength bins.
     for i in range(len(data_wave_min)):
-        # All model wavelengths within this bin.
-        ii = np.where((mod_wave >= data_wave_min[i]) & (mod_wave < data_wave_max[i]))
+        # All model wavelengths within this bin -- we know the indices already.
+        ii = inds['{}'.format(i)]
         # Integrate the model flux over the wavelength bin.
         numerator = np.trapz(mod_flux[ii] * dwave[ii], x=mod_wave[ii])
         denominator = np.trapz(dwave[ii], x=mod_wave[ii])
@@ -469,12 +475,88 @@ def resample_model(data_wave_min, data_wave_max, mod_wave, mod_flux):
     return flux_resamp
 
 
+def resample_model_mean(data_wave_min, data_wave_max, mod_wave, mod_flux, inds=None, max_dim=None):
+    """Resample a high-resolution model to the wavelength sampling of the data using a simple
+    bin average.
+
+    Parameters
+    ----------
+    data_wave_min : array-like(float)
+        Lower edges of data wavelength bins.
+    data_wave_max : array-like(float)
+        Upper edges of data wavelength bins.
+    mod_wave : array-like(float)
+        Model wavelengths.
+    mod_flux : array-like(float)
+        Model spectrum flux values.
+    inds : dict, None
+        Dictionary of model indicies corrsponding to different bins.
+    max_dim : int, None
+        Maximum number of model points in one bin.
+
+    Returns
+    -------
+    flux_resamp : ndarray(float)
+        Model flux resampled to match the data bins.
+    inds : dict
+        Dictionary of model indicies corrsponding to different bins.
+    max_dim : int
+        Maximum number of model points in one bin.
+    """
+
+    assert len(data_wave_min) == len(data_wave_max)
+
+    # Get indices of model points to be put into each bin. When sampling, this can be calculated
+    # once, returned, and then passed for each subsequent evaluation since the wavelength grids
+    # do not change.
+    if inds is None:
+        max_dim = 0
+        inds = {}
+        for i in range(len(data_wave_min)):
+            # All model wavelengths within this bin.
+            ii = np.where((mod_wave >= data_wave_min[i]) & (mod_wave < data_wave_max[i]))
+            inds['{}'.format(i)] = ii
+            # Also get the maximum number of points in a single bin.
+            thisdim = len(ii[0])
+            if thisdim > max_dim:
+                max_dim = thisdim
+
+    # Initialize a 2D storage array.
+    flux_arr = np.zeros((max_dim, len(data_wave_min))) * np.nan
+
+    # Loop over all data wavelength bins.
+    for i in range(len(data_wave_min)):
+        # All model wavelengths within this bin -- we know the indices already.
+        ii = inds['{}'.format(i)]
+        # Put those model points in the storage array.
+        flux_arr[:, i][:len(ii[0])] = mod_flux[ii]
+
+    # Now use a nanmean to collapse along the model flux axis and calculate the binned
+    # model values.
+    flux_resamp = np.nanmean(flux_arr, axis=0)
+
+    return flux_resamp, inds, max_dim
+
+
 def verify_inputs(input_params):
     """Verify input parameter names.
     """
 
-    param_names = ['teff', 'dt_spot', 'f_spot', 'dt_fac', 'f_fac', 'logg_phot',
-                   'dg_spot', 'dg_fac', 'scale', 'sigma']
+    param_names = ['teff', 'dt_spot', 'f_spot', 'dt_fac', 'f_fac', 'logg_phot', 'dg_spot',
+                   'dg_fac', 'scale', 'sigma']
+    for param in input_params.keys():
+        if param not in param_names:
+            raise ValueError('Unknown parameter: {}'.format(param))
+
+    return input_params
+
+
+def verify_inputs_contrast(input_params):
+    """Verify input parameter names.
+    """
+
+    param_names = ['teff', 'dt_umbra', 'f_umbra', 'dt_penumbra', 'logg_phot', 'dg_umbra',
+                   'dg_penumbra', 'sigma', 'cov_frac', 'chord_frac']
     for param in input_params.keys():
         if param not in param_names:
             raise ValueError('Unknown parameter: {}'.format(param))
