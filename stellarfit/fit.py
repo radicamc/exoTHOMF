@@ -12,6 +12,7 @@ import copy
 from datetime import datetime
 from dynesty import NestedSampler
 from dynesty.utils import resample_equal
+from dynesty.pool import Pool
 import emcee
 import h5py
 from multiprocessing import Pool
@@ -20,24 +21,23 @@ import os
 from pathlib import Path
 
 from stellarfit import priors, utils, plotting
-from stellarfit.stellar_model import StellarModel
+from stellarfit.stellar_model import StellarModel, ContrastModel, TLSModel
 from stellarfit.utils import fancyprint
 
 
 class Dataset:
-    """A wrapper class around StellarModel which stores a set of stellar
-    spectrum observations and performs light curve fits.
+    """A general purpose class for fitting a variety of models (StellarModel, ConstrastModel, etc.)
+    to observations.
     """
 
-    def __init__(self, input_parameters, wavebins_low, wavebins_high,
-                 observations, errors, stellar_grid, silent=False):
+    def __init__(self, input_parameters, wavebins_low, wavebins_high, observations, errors,
+                 stellar_grid, fit_type='abs-flux', silent=False):
         """Initialize the Dataset class.
 
         Parameters
         ----------
         input_parameters : dict
-            Dictionary of input parameters and values. Should have form
-            {parameter: value}.
+            Dictionary of input parameters and values. Should have form {parameter: value}.
         wavebins_low : array-like(float)
             Lower edges of data wavelength bins.
         wavebins_high : array-like(float)
@@ -48,6 +48,10 @@ class Dataset:
             Errors on the observed stellar spectrum.
         stellar_grid : scipy RegularGridInterpolator object
             Stellar model grid.
+        fit_type : str
+            Type of model to fit. Currently supported are "abs-flux" for absolute flux fits,
+             "spot-cont" for star spot contrast fits, "spot-amp" for star spot amplitude fits, and
+             "tls" for stellar contamination fits.
         silent : bool
             If False, don't show any progress bars or prints.
         """
@@ -58,14 +62,20 @@ class Dataset:
         self.obs = observations
         self.errors = errors
         self.stellar_grid = stellar_grid
+        self.model = None
         self.silent = silent
         self.output_file = None
         self.mcmc_sampler = None
         self.nested_sampler = None
+        fit_types = ['abs-flux', 'spot-cont', 'spot-amp', 'tls']
+        if fit_type not in fit_types:
+            raise ValueError('Unknown fit type: {0}. \nAcceptable values are {1}.'
+                             .format(fit_type, fit_types))
+        self.fit_type = fit_type
 
-    def fit(self, output_file, sampler='MCMC', mcmc_start=None, mcmc_ncores=1,
-            mcmc_steps=10000, continue_mcmc=False, dynesty_args=None,
-            highpass_filter=False, force_redo=False):
+    def fit(self, output_file, sampler='MCMC', mcmc_start=None, mcmc_ncores=1, mcmc_steps=10000,
+            continue_mcmc=False, dynesty_args=None, highpass_filter=False, force_redo=False,
+            resume_dynesty=False, dynesty_resume_file=None):
         """Run a spectrum fit.
 
         Parameters
@@ -84,12 +94,15 @@ class Dataset:
             If True, continue from a previous MCMC run saved in output_file.
             MCMC only.
         dynesty_args : dict
-            Keyword arguments to pass to the dynesty NestedSampler instance.
-            Nested Sampling only.
+            Keyword arguments to pass to the dynesty NestedSampler instance. Nested Sampling only.
         highpass_filter : bool
             If True, highpass filter the model.
         force_redo : bool
             If True, will overwrite previous output files.
+        resume_dynesty : bool
+            If True, restart sampling from a previous fit.
+        dynesty_resume_file : str, None
+            Previous dynesty sampling save file from which to resume the fit.
         """
 
         # Set up and save output file name.
@@ -100,97 +113,100 @@ class Dataset:
         outdir = os.path.dirname(self.output_file)
         if not os.path.exists(outdir):
             Path(outdir).mkdir(parents=True, exist_ok=True)
-        else:
+        if os.path.exists(self.output_file):
             if force_redo is True:
-                fancyprint('force_redo=True, existing file {} will be '
-                           'overwritten.'.format(output_file), msg_type='WARNING')
+                fancyprint('force_redo=True, existing file {} will be overwritten.'
+                           .format(output_file), msg_type='WARNING')
             else:
-                raise ValueError('Output file already {} exists and '
-                                 'force_redo=False.'.format(output_file))
+                fancyprint('Output file {} already exists and force_redo=False. Existing outputs '
+                           'will not be overwritten.'.format(output_file))
+                return
+
+        # For each parameter, get the prior transform/function to be used based on
+        # the indicated prior distribution.
+        this_param = copy.deepcopy(self.input_parameters)
+        ndim = 0
+        for param in self.input_parameters:
+            dist = self.input_parameters[param]['distribution']
+            if dist == 'fixed':
+                self.input_parameters[param]['function'] = None
+                ndim -= 1
+            elif dist == 'uniform':
+                if sampler == 'MCMC':
+                    self.input_parameters[param]['function'] = priors.logprior_uniform
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_uniform
+                this_param[param]['value'] = np.mean(self.input_parameters[param]['value'])
+            elif dist == 'loguniform':
+                if sampler == 'MCMC':
+                    self.input_parameters[param]['function'] = priors.logprior_loguniform
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_loguniform
+                this_param[param]['value'] = np.mean(self.input_parameters[param]['value'])
+            elif dist == 'normal':
+                if sampler == 'MCMC':
+                    self.input_parameters[param]['function'] = priors.logprior_normal
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_normal
+                this_param[param]['value'] = self.input_parameters[param]['value'][0]
+            elif dist == 'truncated_normal':
+                if sampler == 'MCMC':
+                    self.input_parameters[param]['function'] = priors.logprior_truncatednormal
+                else:
+                    self.input_parameters[param]['function'] = priors.transform_truncatednormal
+                this_param[param]['value'] = self.input_parameters[param]['value'][0]
+            else:
+                raise ValueError('Unknown distribution {0} for parameter {1}'.format(dist, param))
+            ndim += 1
+
+        # Initialize the relevant model with dummy parameters and the passed stellar grid.
+        if self.fit_type == 'abs-flux':
+            self.model = StellarModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-cont':
+            self.model = ContrastModel(this_param, self.stellar_grid)
+        elif self.fit_type == 'spot-amp':
+            self.model = ContrastModel(this_param, self.stellar_grid, amplitude_spectrum=True)
+        else:
+            self.model = TLSModel(this_param, self.stellar_grid)
 
         # For MCMC sampling with emcee.
         if sampler == 'MCMC':
-            # For each parameter, get the prior function to be used based on
-            # the indicated prior distribution.
-            for param in self.input_parameters:
-                dist = self.input_parameters[param]['distribution']
-                if dist == 'fixed':
-                    self.input_parameters[param]['function'] = None
-                elif dist == 'uniform':
-                    self.input_parameters[param]['function'] = priors.logprior_uniform
-                elif dist == 'loguniform':
-                    self.input_parameters[param]['function'] = priors.logprior_loguniform
-                elif dist == 'normal':
-                    self.input_parameters[param]['function'] = priors.logprior_normal
-                elif dist == 'truncated_normal':
-                    self.input_parameters[param]['function'] = priors.logprior_truncatednormal
-                else:
-                    raise ValueError('Unknown distribution {0} for parameter '
-                                     '{1}'.format(dist, param))
-
             if continue_mcmc is False:
                 msg = 'Starting positions must be provided for MCMC sampling.'
                 assert mcmc_start is not None, msg
 
             # Arguments for the log probability function call.
-            log_prob_args = (self.input_parameters, self.wave_low,
-                             self.wave_up, self.obs, self.errors,
-                             self.stellar_grid, highpass_filter)
+            log_prob_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
+                             self.errors, self.model, highpass_filter)
 
             # Initialize and run the emcee sampler.
-            mcmc_sampler = fit_emcee(log_probability, initial_pos=mcmc_start,
-                                     silent=self.silent, mcmc_steps=mcmc_steps,
-                                     log_probability_args=log_prob_args,
-                                     output_file=output_file,
-                                     continue_run=continue_mcmc,
+            mcmc_sampler = fit_emcee(log_probability, initial_pos=mcmc_start, silent=self.silent,
+                                     mcmc_steps=mcmc_steps, log_probability_args=log_prob_args,
+                                     output_file=output_file, continue_run=continue_mcmc,
                                      ncores=mcmc_ncores)
             self.mcmc_sampler = mcmc_sampler
 
         # For Nested Sampling with dynesty.
         elif sampler == 'NestedSampling':
-            # For each parameter, get the prior transform function to be used
-            # based on the indicated prior distribution.
-            ndim = 0
-            for param in self.input_parameters:
-                dist = self.input_parameters[param]['distribution']
-                if dist == 'fixed':
-                    self.input_parameters[param]['function'] = None
-                    ndim -= 1
-                elif dist == 'uniform':
-                    self.input_parameters[param]['function'] = priors.transform_uniform
-                elif dist == 'loguniform':
-                    self.input_parameters[param]['function'] = priors.transform_loguniform
-                elif dist == 'normal':
-                    self.input_parameters[param]['function'] = priors.transform_normal
-                elif dist == 'truncated_normal':
-                    self.input_parameters[param]['function'] = priors.transform_truncatednormal
-                else:
-                    raise ValueError('Unknown distribution {0} for '
-                                     'parameter {1}'.format(dist, param))
-                ndim += 1
-
             # Arguments for the log likelihood function call.
-            log_like_args = (self.input_parameters, self.wave_low,
-                             self.wave_up, self.obs, self.errors,
-                             self.stellar_grid, highpass_filter)
+            log_like_args = (self.input_parameters, self.wave_low, self.wave_up, self.obs,
+                             self.errors, self.model, highpass_filter)
             ptform_kwargs = {'param_dict': self.input_parameters}
 
-            nested_sampler = fit_dynesty(set_prior_transform, log_likelihood,
-                                         ndim, output_file=output_file,
-                                         log_like_args=log_like_args,
-                                         dynesty_args=dynesty_args,
-                                         ptform_kwargs=ptform_kwargs,
-                                         silent=self.silent)
+            nested_sampler = fit_dynesty(set_prior_transform, log_likelihood, ndim,
+                                         output_file=output_file, log_like_args=log_like_args,
+                                         dynesty_args=dynesty_args, ptform_kwargs=ptform_kwargs,
+                                         silent=self.silent, resume=resume_dynesty,
+                                         resume_file=dynesty_resume_file)
             self.nested_sampler = nested_sampler
 
         else:
             msg = 'Unrecognized sampler, {}'.format(sampler)
             raise ValueError(msg)
 
-    def get_param_dict_from_fit(self, method='median', mcmc_burnin=None,
-                                mcmc_thin=15, drop_chains=None):
-        """Reformat MCMC fit outputs into the parameter dictionary format
-        expected by Model.
+    def get_param_dict_from_fit(self, method='median', mcmc_burnin=None, mcmc_thin=15,
+                                drop_chains=None):
+        """Reformat MCMC fit outputs into the parameter dictionary format expected by Model.
 
         Parameters
         ----------
@@ -198,8 +214,7 @@ class Dataset:
             Method via which to get best fitting parameters from MCMC chains.
             Either "median" or "maxlike".
         mcmc_burnin : int
-            Number of steps to discard as burn in. Defaults to 75% of chain
-            length. Only for MCMC.
+            Number of steps to discard as burn in. Defaults to 75% of chain length. Only for MCMC.
         mcmc_thin : int
             Increment by which to thin chains. Only for MCMC.
         drop_chains : list(int), None
@@ -211,24 +226,19 @@ class Dataset:
             Dictionary of light curve model parameters.
         """
 
-        param_dict = utils.get_param_dict_from_fit(self.output_file,
-                                                   method=method,
-                                                   mcmc_burnin=mcmc_burnin,
-                                                   mcmc_thin=mcmc_thin,
-                                                   silent=self.silent,
-                                                   drop_chains=drop_chains)
+        param_dict = utils.get_param_dict_from_fit(self.output_file, method=method,
+                                                   mcmc_burnin=mcmc_burnin, mcmc_thin=mcmc_thin,
+                                                   silent=self.silent, drop_chains=drop_chains)
         return param_dict
 
-    def get_results_from_fit(self, mcmc_burnin=None, mcmc_thin=15,
-                             drop_chains=None):
-        """Extract MCMC posterior sample statistics (median and 1 sigma bounds)
-        for each fitted parameter.
+    def get_results_from_fit(self, mcmc_burnin=None, mcmc_thin=15, drop_chains=None):
+        """Extract MCMC posterior sample statistics (median and 1 sigma bounds) for each
+        fitted parameter.
 
         Parameters
         ----------
         mcmc_burnin : int
-            Number of steps to discard as burn in. Defaults to 75% of chain
-            length.
+            Number of steps to discard as burn in. Defaults to 75% of chain length.
         mcmc_thin : int
             Increment by which to thin chains.
         drop_chains : list(int), None
@@ -237,19 +247,16 @@ class Dataset:
         Returns
         -------
         results_dict : dict
-            Dictionary of posterior medians and 1 sigma bounds for each fitted
-            parameter.
+            Dictionary of posterior medians and 1 sigma bounds for each fitted parameter.
         """
 
-        results_dict = utils.get_results_from_fit(self.output_file,
-                                                  mcmc_burnin=mcmc_burnin,
-                                                  mcmc_thin=mcmc_thin,
-                                                  silent=self.silent,
+        results_dict = utils.get_results_from_fit(self.output_file, mcmc_burnin=mcmc_burnin,
+                                                  mcmc_thin=mcmc_thin, silent=self.silent,
                                                   drop_chains=drop_chains)
         return results_dict
 
-    def plot_mcmc_chains(self, labels=None, log_params=None,
-                         highlight_chains=None, drop_chains=None):
+    def plot_mcmc_chains(self, labels=None, log_params=None, highlight_chains=None,
+                         drop_chains=None):
         """Plot MCMC chains.
 
         Parameters
@@ -264,20 +271,17 @@ class Dataset:
             Indices of chains to drop.
         """
 
-        plotting.plot_mcmc_chains(self.output_file, labels=labels,
-                                  log_params=log_params,
-                                  highlight_chains=highlight_chains,
-                                  drop_chains=drop_chains)
+        plotting.plot_mcmc_chains(self.output_file, labels=labels, log_params=log_params,
+                                  highlight_chains=highlight_chains, drop_chains=drop_chains)
 
-    def make_corner_plot(self, mcmc_burnin=None, mcmc_thin=15, labels=None,
-                         outpdf=None, log_params=None, drop_chains=None):
+    def make_corner_plot(self, mcmc_burnin=None, mcmc_thin=15, labels=None, outpdf=None,
+                         log_params=None, drop_chains=None):
         """Make a corner plot of fitted posterior distributions.
 
         Parameters
         ----------
         mcmc_burnin : int
-            Number of steps to discard as burn in. Defaults to 75% of chain
-            length.
+            Number of steps to discard as burn in. Defaults to 75% of chain length.
         mcmc_thin : int
             Increment by which to thin chains.
         labels : list(str)
@@ -290,14 +294,13 @@ class Dataset:
             Indices of chains to drop.
         """
 
-        plotting.make_corner_plot(self.output_file, mcmc_burnin=mcmc_burnin,
-                                  mcmc_thin=mcmc_thin, labels=labels,
-                                  outpdf=outpdf, log_params=log_params,
+        plotting.make_corner_plot(self.output_file, mcmc_burnin=mcmc_burnin, mcmc_thin=mcmc_thin,
+                                  labels=labels, outpdf=outpdf, log_params=log_params,
                                   drop_chains=drop_chains)
 
 
-def fit_dynesty(prior_transform, log_like, ndim, output_file,
-                log_like_args, ptform_kwargs, dynesty_args=None, silent=False):
+def fit_dynesty(prior_transform, log_like, ndim, output_file, log_like_args, ptform_kwargs,
+                dynesty_args=None, silent=False, resume=False, resume_file=None):
     """Run a light curve fit via nested sampling using the dynesty.
 
     Parameters
@@ -318,6 +321,10 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file,
         Arguments for dynesty NestedSampler instance.
     silent : bool
         If True, do not show progress updates.
+    resume : bool
+        If True, restart sampling from a previous fit.
+    resume_file : str, None
+        Previous dynesty sampling save file from which to resume the fit.
 
     Returns
     -------
@@ -341,16 +348,19 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file,
         g = hf.create_group('inputs/{}'.format(param))
         g.attrs['location'] = i
         dt = h5py.string_dtype()
-        g.create_dataset('distribution',
-                         data=inputs[param]['distribution'], dtype=dt)
+        g.create_dataset('distribution', data=inputs[param]['distribution'], dtype=dt)
         g.create_dataset('value', data=inputs[param]['value'])
     hf.close()
 
     # Initialize and run nested sampler.
-    sampler = NestedSampler(log_like, prior_transform, ndim,
-                            logl_args=log_like_args, sample='rwalk',
-                            ptform_kwargs=ptform_kwargs, **dynesty_args)
-    sampler.run_nested(print_progress=not silent)
+    if resume is True:
+        sampler = NestedSampler.restore(resume_file)
+    else:
+        sampler = NestedSampler(log_like, prior_transform, ndim, sample='rwalk',
+                                logl_args=log_like_args, ptform_kwargs=ptform_kwargs,
+                                **dynesty_args)
+    sampler.run_nested(print_progress=not silent, resume=resume,
+                       checkpoint_file=output_file[:-3]+'_dynesty.save')
 
     # Get dynesty results dictionary.
     results = sampler.results
@@ -369,9 +379,8 @@ def fit_dynesty(prior_transform, log_like, ndim, output_file,
     return sampler
 
 
-def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False,
-              silent=False, mcmc_steps=10000, log_probability_args=None,
-              ncores=1):
+def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False, silent=False,
+              mcmc_steps=10000, log_probability_args=None, ncores=1):
     """Run a light curve fit via MCMC using the emcee sampler.
 
     Parameters
@@ -379,8 +388,8 @@ def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False,
     log_prob : function
         Callable function to evaluate the fit log probability.
     output_file : str
-        File to which to save outputs. If continuing a run, this should also
-        be the input file containing the previous MCMC chains.
+        File to which to save outputs. If continuing a run, this should also be the input file
+        containing the previous MCMC chains.
     initial_pos : ndarray(float), None
         Starting positions for the MCMC sampling.
     continue_run : bool
@@ -404,14 +413,12 @@ def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False,
     if continue_run is True:
         # Override any passed initial positions.
         if initial_pos is not None:
-            msg = 'continue_run option selected. Ignoring passed initial ' \
-                  'positions.'
+            msg = 'continue_run option selected. Ignoring passed initial positions.'
             fancyprint(msg, msg_type='WARNING')
             initial_pos = None
 
-    # If we are starting a new run, we want to create the output h5 file
-    # and append useful information such as metadata and priors used for
-    # the fit.
+    # If we are starting a new run, we want to create the output h5 file and append useful
+    # information such as metadata and priors used for the fit.
     if continue_run is False:
         # Create all the metadata for this fit.
         hf = h5py.File(output_file, 'w')
@@ -426,8 +433,7 @@ def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False,
             g = hf.create_group('inputs/{}'.format(param))
             g.attrs['location'] = i
             dt = h5py.string_dtype()
-            g.create_dataset('distribution',
-                             data=inputs[param]['distribution'], dtype=dt)
+            g.create_dataset('distribution', data=inputs[param]['distribution'], dtype=dt)
             g.create_dataset('value', data=inputs[param]['value'])
         hf.close()
 
@@ -446,18 +452,16 @@ def fit_emcee(log_prob, output_file, initial_pos=None, continue_run=False,
 
     # Do the sampling.
     with Pool(processes=ncores) as pool:
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_prob,
-                                        backend=backend, pool=pool,
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_prob, backend=backend, pool=pool,
                                         args=log_probability_args)
         output = sampler.run_mcmc(initial_pos, mcmc_steps, progress=not silent)
 
     return sampler
 
 
-def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors,
-                   model_grid, highpass_filter=False):
-    """Evaluate the log likelihood for a dataset and a given set of model
-    parameters.
+def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
+                   highpass_filter=False):
+    """Evaluate the log likelihood for a dataset and a given set of model parameters.
 
     Parameters
     ----------
@@ -473,8 +477,8 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors,
         Spectrum to fit.
     errors: array-like(float)
         Errors on the stellar spectrum
-    model_grid :
-        Stellar model grid.
+    stellar_model : StellarModel instance
+        Initialized stellar model.
     highpass_filter : bool
         If True, highpass filter the model.
 
@@ -494,10 +498,9 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors,
         pcounter += 1
 
     try:
-        thismodel = StellarModel(this_param, model_grid)
-        thismodel.compute_model(data_wave_low=wavebins_low,
-                                data_wave_high=wavebins_up,
-                                highpass_filter=highpass_filter)
+        stellar_model.update_parameters(this_param)
+        stellar_model.compute_model(data_wave_low=wavebins_low, data_wave_high=wavebins_up,
+                                    highpass_filter=highpass_filter)
     except ValueError:
         return -np.inf
 
@@ -513,15 +516,14 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors,
     else:
         thisdata = data
 
-    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - thismodel.model)/thiserr)**2)
+    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - stellar_model.model) / thiserr)**2)
 
     return log_like
 
 
-def log_probability(theta, param_dict, wavebins_low, wavebins_up, data,
-                    errors, model_grid, highpass_filter=False):
-    """Evaluate the log probability for a dataset and a given set of model
-    parameters.
+def log_probability(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
+                    highpass_filter=False):
+    """Evaluate the log probability for a dataset and a given set of model parameters.
 
     Parameters
     ----------
@@ -537,8 +539,8 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data,
         Spectrum to fit.
     errors: array-like(float)
         Errors on the stellar spectrum
-    model_grid :
-        Stellar model grid.
+    stellar_model : StellarModel/ContrastModel instance
+        Initialized stellar model.
     highpass_filter : bool
         If True, highpass filter the model.
 
@@ -551,8 +553,8 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data,
     lp = set_logprior(theta, param_dict)
     if not np.isfinite(lp):
         return -np.inf
-    ll = log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data,
-                        errors, model_grid, highpass_filter=highpass_filter)
+    ll = log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, stellar_model,
+                        highpass_filter=highpass_filter)
     if not np.isfinite(ll):
         return -np.inf
 
@@ -562,8 +564,7 @@ def log_probability(theta, param_dict, wavebins_low, wavebins_up, data,
 
 
 def set_logprior(theta, param_dict):
-    """Calculate the fit prior based on a set of input values and prior
-    functions.
+    """Calculate the fit prior based on a set of input values and prior functions.
 
     Parameters
     ----------
@@ -591,8 +592,7 @@ def set_logprior(theta, param_dict):
 
 
 def set_prior_transform(theta, param_dict):
-    """Define the prior transform based on a set of input values and prior
-    functions.
+    """Define the prior transform based on a set of input values and prior functions.
 
     Parameters
     ----------
@@ -612,8 +612,7 @@ def set_prior_transform(theta, param_dict):
     for param in param_dict:
         if param_dict[param]['distribution'] == 'fixed':
             continue
-        thisprior = param_dict[param]['function'](theta[pcounter],
-                                                  param_dict[param]['value'])
+        thisprior = param_dict[param]['function'](theta[pcounter], param_dict[param]['value'])
         prior_transform.append(thisprior)
         pcounter += 1
 
