@@ -143,6 +143,63 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_f
         plt.show()
 
 
+def make_tls_spectrum_plot(wavelengths, data, model, errors, waves_plot=None, model_plot=None, outpdf=None):
+    """Make a plot of the transit spectrum TLS fit and residuals.
+
+    Parameters
+    ----------
+    wavelengths
+    data
+    model
+    errors
+    waves_plot
+    model_plot
+    outpdf
+    """
+
+    def chi2(o, m, e):
+        return np.nansum((o - m) ** 2 / e ** 2)
+
+    fig = plt.figure(figsize=(10, 5), facecolor='white')
+    gs = GridSpec(2, 1, height_ratios=[2, 1], hspace=0.1)
+
+    ax1 = plt.subplot(gs[0])
+    ax2 = plt.subplot(gs[1])
+
+    thisdata = data
+
+    ax1.errorbar(wavelengths, thisdata, yerr=errors, fmt='o', mfc='white', c='royalblue', ms=1,
+                 zorder=-1)
+    if model_plot is not None:
+        ax1.plot(waves_plot, model_plot, c='black', lw=0.5)
+    else:
+        ax1.plot(wavelengths, model, c='black', lw=0.5)
+
+    ax2.errorbar(wavelengths, thisdata - model, mfc='white', c='royalblue', fmt='o', ms=1)
+    ax2.axhline(0, ls='--', c='black')
+
+    ax1.tick_params(direction='in')
+    ax2.tick_params(direction='in')
+    ax1.xaxis.set_major_formatter(plt.NullFormatter())
+    ax2.set_xlabel('Wavelength [µm]', fontsize=12)
+    ax1.set_ylabel('Transit Depth [ppm]', fontsize=12)
+    ax2.set_ylabel('Residuals', fontsize=12)
+
+    xpos = np.percentile(wavelengths, 1)
+    ax2.text(xpos, np.max(thisdata - model),
+             r'$\rm \chi^2_d$={:.2f}'.format(chi2(thisdata, model, errors) / len(thisdata)))
+
+    if outpdf is not None:
+        if isinstance(outpdf, matplotlib.backends.backend_pdf.PdfPages):
+            outpdf.savefig(fig)
+        else:
+            fig.savefig(outpdf)
+        fig.clear()
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def plot_mcmc_chains(filename, labels=None, log_params=None,
                      highlight_chains=None, drop_chains=None):
     """Plot MCMC chains.

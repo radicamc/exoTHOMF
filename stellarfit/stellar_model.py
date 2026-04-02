@@ -9,6 +9,7 @@ Code to interpolate stellar models of inhomogeneous surfaces.
 """
 
 import numpy as np
+from spectres import spectres
 
 from stellarfit import utils
 
@@ -349,4 +350,188 @@ class ContrastModel:
             contrast_mod = utils.highpass_filter(contrast_mod)
 
         self.model = contrast_mod
+        self.wavelengths = waves
+
+
+class TLSModel:
+    """tertiary StellarFit class. Interpolates a model of transit spectrum stellar contamination
+     given a set of input parameters and a stellar model grid.
+    """
+
+    def __init__(self, input_parameters, stellar_grid, dt_min=100):
+        """Initialize the TLSModel class.
+
+        Parameters
+        ----------
+        input_parameters : dict
+            Dictionary of input parameters.
+        stellar_grid : scipy RegularGridInterpolator object
+            Grid of stellar models.
+        dt_min : float
+            Minimum allowed temperature difference between the photosphere and heterogeneities.
+        """
+
+        self.stellar_grid = stellar_grid
+        self.input_parameters = None
+        self.spots, self.faculae = False, False
+        self.model = None
+        self.wavelengths = None
+        self.resample_inds = None
+        self.resample_max_dim = None
+
+        # Set input parameters.
+        self.update_parameters(input_parameters, dt_min)
+
+    def update_parameters(self, input_parameters, dt_min=100):
+        """Update or set the parameter dictionary.
+
+        Parameters
+        ----------
+        input_parameters : dict
+            Dictionary of input parameters.
+        dt_min : float
+            Minimum allowed temperature difference between the photosphere and heterogeneities.
+        """
+
+        input_parameters = utils.verify_inputs_tls(input_parameters)
+
+        # Determine whether spots, faculae or both will be included.
+        for key in input_parameters.keys():
+            key_split = key.split('_')
+            if len(key_split) > 1:
+                if key_split[1] == 'spot':
+                    self.spots = True
+                elif key_split[1] == 'fac':
+                    self.faculae = True
+        # If neither, break.
+        if self.spots is False and self.faculae is False:
+            msg = 'One of either spots or faculae must be included in a TLS fit.'
+            return ValueError(msg)
+
+        # Make sure a photosphere temperature and gravity are included.
+        for param in ['teff', 'logg_phot']:
+            assert param in input_parameters.keys()
+        # Make sure a reasonable spot temperature and covering fraction are passed if spots are
+        # being used.
+        if self.spots is True:
+            for param in ['dt_spot', 'f_spot']:
+                assert param in input_parameters.keys()
+                if input_parameters['dt_spot']['value'] < dt_min:
+                    msg = 'dt_spot less than minimum temperature contrast of {}K.'.format(dt_min)
+                    raise ValueError(msg)
+        # Do the same for faculae.
+        if self.faculae is True:
+            for param in ['dt_fac', 'f_fac']:
+                assert param in input_parameters.keys()
+                if input_parameters['dt_fac']['value'] < dt_min:
+                    msg = 'dt_fac less than minimum temperature contrast of {}K.'.format(dt_min)
+                    raise ValueError(msg)
+
+        # Set input parameters.
+        self.input_parameters = input_parameters
+
+    def compute_model(self, data_wave_low=None, data_wave_high=None, highpass_filter=False,
+                      mean=True, res=None):
+        """Compute a stellar spectrum model with the given set of input parameters and bin
+        (if desired).
+
+        Parameters
+        ----------
+        data_wave_low : array-like(float), None
+            Lower edges of data wavelength bins (in µm).
+        data_wave_high : array-like(float), None
+            Upper edges of data wavelength bins (in µm).
+        highpass_filter : bool
+            Dummy argument to not break fitting routine.
+        mean : bool
+            Spectral reampling method. If True use the average (faster). If False, use
+            trapezoidal integration (slower).
+        res : int, None
+            Constant spectral resolution at which to bin model. Mostly for plotting purposes.
+        """
+
+        # Get the appropriate stellar model from the model grid.
+        t = self.input_parameters['teff']['value']
+        g = self.input_parameters['logg_phot']['value']
+        # Photosphere SED
+        i_phot = self.stellar_grid.stellar_grid((t, g))
+
+        # If the star has spots...
+        if self.spots is True:
+            t_spot = t - self.input_parameters['dt_spot']['value']
+            f_spot = self.input_parameters['f_spot']['value']
+            if 'dg_spot' in self.input_parameters.keys():
+                g_spot = g + self.input_parameters['dg_spot']['value']
+            else:
+                g_spot = g
+            i_spot = self.stellar_grid.stellar_grid((t_spot, g_spot))
+        else:
+            f_spot = 0
+            i_spot = np.zeros_like(i_phot)
+
+        # Calculate the spot conatmination factor
+        eps_spot = f_spot * (1 - i_spot / i_phot)
+
+        # If the star has faculae...
+        if self.faculae is True:
+            t_fac = t + self.input_parameters['dt_fac']['value']
+            f_fac = self.input_parameters['f_fac']['value']
+            if 'dg_fac' in self.input_parameters.keys():
+                g_fac = g + self.input_parameters['dg_fac']['value']
+            else:
+                g_fac = g
+            i_fac = self.stellar_grid.stellar_grid((t_fac, g_fac))
+        else:
+            f_fac = 0
+            i_fac = np.zeros_like(i_phot)
+
+        # Calculate the facula conatmination factor
+        eps_fac = f_fac * (1 - i_fac / i_phot)
+
+        # Make sure that the heterogeneity fraction is <50%.
+        if f_fac + f_spot >= 0.5:
+            msg = 'Combined spot and facula covering fraction is >50%.'
+            raise ValueError(msg)
+
+        # Calculate the contamination spectrum, following Equ 5 in Fournier-Tondreau et al. (2024).
+        eps = 1 / (1 - (eps_spot + eps_fac))
+
+        # Construct the transit spectrum assuming a uniform Rp/Rs due to the planet.
+        rprs = self.input_parameters['rprs']['value']
+        spec = eps * rprs**2
+
+        if data_wave_low is not None:
+            assert len(data_wave_low) == len(data_wave_high)
+            data_wave = np.mean([data_wave_low, data_wave_high], axis=0)
+            # For PHOENIX, New Era models, bin down to resolution of the data.
+            if self.stellar_grid.model_type != 'SPHINX':
+                if mean is True:
+                    out = utils.resample_model_mean(data_wave_low, data_wave_high,
+                                                    self.stellar_grid.wavelengths, spec,
+                                                    inds=self.resample_inds,
+                                                    max_dim=self.resample_max_dim)
+                    spec, self.resample_inds, self.resample_max_dim = out
+                else:
+                    spec = utils.resample_model(data_wave_low, data_wave_high,
+                                                self.stellar_grid.wavelengths, spec)
+            # For SPHINX models, bin data down to model resolution.
+            else:
+                spec = np.interp(data_wave, self.stellar_grid.wavelengths, spec)
+            waves = data_wave
+
+        elif res is not None:
+            # Create binned wavelength axis at resolution res.
+            dlog_wl = 1.0 / res
+            waves = self.stellar_grid.wavelengths
+            nbins = (np.log(waves[-1]) - np.log(waves[0])) / dlog_wl
+            nbins = np.around(nbins).astype(np.int64)
+            log_wave_bin = np.linspace(np.log(waves[0]), np.log(waves[-1]), nbins)
+            binned_waves = np.exp(log_wave_bin)
+            spec = spectres(binned_waves, waves, spec)
+            waves = binned_waves
+
+        else:
+            waves = self.stellar_grid.wavelengths
+
+        self.model = spec
         self.wavelengths = waves
