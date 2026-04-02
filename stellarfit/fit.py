@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 
 from stellarfit import priors, utils, plotting
-from stellarfit.stellar_model import StellarModel, ContrastModel
+from stellarfit.stellar_model import StellarModel, ContrastModel, TLSModel
 from stellarfit.utils import fancyprint
 
 
@@ -167,7 +167,7 @@ class Dataset:
         elif self.fit_type == 'spot-amp':
             self.model = ContrastModel(this_param, self.stellar_grid, amplitude_spectrum=True)
         else:
-            raise NotImplementedError('TLS fits not currently implemented.')
+            self.model = TLSModel(this_param, self.stellar_grid)
 
         # For MCMC sampling with emcee.
         if sampler == 'MCMC':
@@ -516,7 +516,7 @@ def log_likelihood(theta, param_dict, wavebins_low, wavebins_up, data, errors, s
     else:
         thisdata = data
 
-    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - stellar_model.model)/thiserr)**2)
+    log_like = -0.5 * np.nansum(np.log(2 * np.pi * thiserr**2) + ((thisdata - stellar_model.model) / thiserr)**2)
 
     return log_like
 

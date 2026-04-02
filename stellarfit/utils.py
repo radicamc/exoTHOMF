@@ -564,6 +564,19 @@ def verify_inputs_contrast(input_params):
     return input_params
 
 
+def verify_inputs_tls(input_params):
+    """Verify input parameter names.
+    """
+
+    param_names = ['teff', 'dt_spot', 'f_spot', 'dt_fac', 'f_fac', 'logg_phot', 'dg_spot',
+                   'dg_fac', 'rprs']
+    for param in input_params.keys():
+        if param not in param_names:
+            raise ValueError('Unknown parameter: {}'.format(param))
+
+    return input_params
+
+
 def verify_path(path):
     """Verify that a given directory exists. If not, create it.
 
