@@ -15,7 +15,7 @@ from matplotlib.gridspec import GridSpec
 import matplotlib.pyplot as plt
 import numpy as np
 
-from stellarfit import utils
+from exothomf import utils
 
 
 def make_corner_plot(filename, mcmc_burnin=None, mcmc_thin=15, labels=None,

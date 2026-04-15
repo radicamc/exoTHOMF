@@ -20,9 +20,9 @@ import numpy as np
 import os
 from pathlib import Path
 
-from stellarfit import priors, utils, plotting
-from stellarfit.stellar_model import StellarModel, ContrastModel, TLSModel
-from stellarfit.utils import fancyprint
+from exothomf import priors, utils, plotting
+from exothomf.stellar_model import StellarModel, ContrastModel, TLSModel
+from exothomf.utils import fancyprint
 
 
 class Dataset:

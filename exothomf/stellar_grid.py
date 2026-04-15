@@ -16,8 +16,8 @@ from scipy.interpolate import RegularGridInterpolator
 import spectres
 from tqdm import tqdm
 
-from stellarfit import utils
-from stellarfit.utils import fancyprint
+from exothomf import utils
+from exothomf.utils import fancyprint
 
 
 class StellarGrid:

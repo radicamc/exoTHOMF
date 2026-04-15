@@ -11,7 +11,7 @@ Code to interpolate stellar models of inhomogeneous surfaces.
 import numpy as np
 from spectres import spectres
 
-from stellarfit import utils
+from exothomf import utils
 
 
 class StellarModel:
