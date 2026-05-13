@@ -4,7 +4,7 @@
 from setuptools import setup
 
 setup(name='exothomf',
-      version='1.0.0',
+      version='1.0.1',
       license='MIT',
       author='Michael Radica',
       author_email='radicamc@uchicago.edu',

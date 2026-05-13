@@ -128,8 +128,8 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_f
         ax1.set_ylabel('Flux at Earth [erg/s/cm2/µm]', fontsize=12)
     ax2.set_ylabel('Residuals', fontsize=12)
 
-    xpos = np.percentile(wavelengths, 1)
-    ax2.text(xpos, np.max(thisdata - model),
+    xpos = np.nanpercentile(wavelengths, 1)
+    ax2.text(xpos, np.nanmax(thisdata - model),
              r'$\rm \chi^2_d$={:.2f}'.format(chi2(thisdata, model, errors) / len(thisdata)))
 
     if outpdf is not None:
@@ -143,7 +143,8 @@ def make_spectrum_plot(wavelengths, data, model, errors, outpdf=None, highpass_f
         plt.show()
 
 
-def make_tls_spectrum_plot(wavelengths, data, model, errors, waves_plot=None, model_plot=None, outpdf=None):
+def make_tls_spectrum_plot(wavelengths, data, model, errors, waves_plot=None, model_plot=None,
+                           outpdf=None):
     """Make a plot of the transit spectrum TLS fit and residuals.
 
     Parameters
